@@ -1,0 +1,61 @@
+import os
+import tempfile
+import telebot
+from receipt_ocr_easyocr import (
+    ocr_easyocr, detect_store, find_date, find_total, 
+    extract_items, export_csv, CURRENCY
+)
+
+BOT_TOKEN = ''
+
+bot = telebot.TeleBot(BOT_TOKEN)
+
+@bot.message_handler(commands=['start'])
+def start(message):
+    bot.reply_to(message, "Привет! Отправь фото чека из Пятёрочки, Перекрёстка или Чижика — разберу его.")
+
+@bot.message_handler(content_types=['photo'])
+def handle_photo(message):
+    try:
+        file_info = bot.get_file(message.photo[-1].file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+        
+        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as temp_img:
+            temp_img.write(downloaded_file)
+            image_path = temp_img.name
+
+        full_text, lines = ocr_easyocr(image_path)
+        os.unlink(image_path)
+        store = detect_store(full_text)
+        if store == "Other":
+            bot.reply_to(message, "Извините, в чеке указан магазин не из холдинга X5 Group, поэтому не могу его прочитать")
+            return
+
+        parsed = {
+            "store": store,
+            "date": find_date(full_text),
+            "total": find_total(full_text),
+            "items": extract_items(lines),
+        }
+        bot.reply_to(message, f"Полный текст чека:\n{full_text}")
+
+        if len(parsed["items"]) < 1 and not parsed["total"]:
+            bot.reply_to(message, "Мало данных распознано. Попробуй переслать фото в лучшем качестве (чёткое, без бликов).")
+            return
+
+        with tempfile.NamedTemporaryFile(suffix='.csv', delete=False) as temp_csv:
+            export_csv(parsed, temp_csv.name)
+            csv_path = temp_csv.name
+
+        summary = f"Магазин: {parsed['store']}\nДата: {parsed['date'] or 'Не найдена'}\nИтог: {parsed['total'] or 'Не найден'} {CURRENCY}\nТовары: {len(parsed['items'])}"
+        bot.reply_to(message, summary)
+        bot.send_document(message.chat.id, open(csv_path, 'rb'))
+        os.unlink(csv_path)
+
+    except Exception as e:
+        bot.reply_to(message, f"Ошибка: {str(e)}. Попробуй другое фото.")
+
+if __name__ == '__main__':
+    bot.delete_webhook(drop_pending_updates=True)
+    print("Бот запущен...")
+    bot.infinity_polling()
