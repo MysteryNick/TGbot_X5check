@@ -1,4 +1,5 @@
-port re
+
+import re
 import csv
 from typing import List, Dict, Tuple, Optional
 import cv2
@@ -6,9 +7,7 @@ import numpy as np
 import easyocr
 from PIL import Image
 
-# ──────────────────────────────────────────────────────────
 # КОНФИГУРАЦИЯ
-# ──────────────────────────────────────────────────────────
 
 MIN_CONF = 25.0
 CURRENCY = "₽"
@@ -25,13 +24,13 @@ IGNORE_KEYWORDS = [
 ]
 
 ITEM_PATTERNS = [
-    # Самый важный — цена*кол-во (ваш лог: "99.99*1")
+    # Самый важный — цена*количество
+    r"^(?P<price>\d+[\.,]\d{2})\s*\*\s*(?P<qty>\d+)$",
+
+    # Фрагменты с ценой и количеством
     r"^(?P<name>.+?)\s+(?P<price>\d+[\.,]\d{2})\s*\*\s*(?P<qty>\d+)$",
 
-    # Фрагменты с *1/*2
-    r"^(?P<name>.+?)\s*(?P<qty>\d+)\s*\*\s*1\s*(?P<price>\d+[\.,]\d{2})$",
-
-    # Цена + кол-во + итого
+    # Цена + количество + возможный итог
     r"^(?P<name>.+?)\s+(?P<price>\d+[\.,]\d{2})\s*(?P<qty>\*\d+|\d+)\s*(?P<total>\d+[\.,]\d{2})?$",
 
     # Название + цена (qty=1)
@@ -39,12 +38,8 @@ ITEM_PATTERNS = [
 
     # Классика с ×
     r"^(?P<name>.+?)\s+(?P<qty>\d+[.,]?\d*)\s*[xх*×]\s*(?P<price>[\d\s.,]+)$",
-
-    #Специально под наш OCR
-    r"^(?P<price>\d+[\.,]\d{2})\s*\*\s*(?P<qty>\d+)$",
 ]
 
-# Ленивая инициализация EasyOCR
 reader = None
 
 def get_reader():
@@ -55,9 +50,7 @@ def get_reader():
         print("EasyOCR готов")
     return reader
 
-# ──────────────────────────────────────────────────────────
-# ФУНКЦИИ
-# ──────────────────────────────────────────────────────────
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 
 def normalize(text: str) -> str:
     if not text:
@@ -74,12 +67,13 @@ def detect_store(full_text: str) -> str:
 
 def find_date(full_text: str) -> Optional[str]:
     patterns = [
-        r"(\d{2})\.(\d{2})\.(\d{2})\b",                         
-        r"(\d{2})\.(\d{2})\.(\d{2})\s+\d{2}:\d{2}",                
-        r"\b(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2})\b",              
-        r"(\d{2})\.(\d{2})\.(\d{4})\b",                                ]
+        r"(\d{2})\.(\d{2})\.(\d{2})\b",                            
+        r"\b(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})\b",
+        r"(\d{2})\.(\d{2})\.(\d{4})\b",
+        r"\d{2}\.\d{2}\.\d{2}\s+\d{2}:\d{2}",                      
+    ]
     for pat in patterns:
-        m = re.search(pat, full_text, re.IGNORECASE)
+        m = re.search(pat, full_text)
         if m:
             d, mo, y = m.groups()
             if len(y) == 2:
@@ -88,10 +82,6 @@ def find_date(full_text: str) -> Optional[str]:
                 return f"{int(d):02d}.{int(mo):02d}.{int(y):04d}"
             except:
                 pass
-    # Fallback — ищем любые похожие даты
-    m = re.search(r"\d{2}\.\d{2}\.\d{2}", full_text)
-    if m:
-        return m.group() + " (примерно)"
     return None
 
 def _normalize_number(s: str) -> str:
@@ -103,7 +93,7 @@ def _normalize_number(s: str) -> str:
 
 def find_total(full_text: str) -> Optional[str]:
     money_pat = re.compile(r"\d+[\.,]\d{2}")
-    lines = normalize(full_text).splitlines()[-35:]  # последние строки
+    lines = normalize(full_text).splitlines()[-35:]
     
     found_final = False
     candidates = []
@@ -129,7 +119,6 @@ def preprocess_image(path: str) -> np.ndarray:
     img = cv2.imread(path)
     if img is None:
         raise ValueError("Не удалось загрузить изображение")
-    
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
@@ -150,7 +139,7 @@ def ocr_easyocr(image_path: str) -> Tuple[str, List[Tuple[str, float]]]:
                         contrast_ths=0.01,
                         text_threshold=0.4,
                         low_text=0.2,
-                        mag_ratio=3.0)
+                        mag_ratio=3.0)  # увеличено для лучшего чтения мелкого текста
     
     lines = []
     full_text_parts = []
@@ -164,7 +153,11 @@ def ocr_easyocr(image_path: str) -> Tuple[str, List[Tuple[str, float]]]:
     
     lines.sort(key=lambda x: min(p[1] for p in bbox))
     
-    return "\n".join(full_text_parts), lines
+    full_text = "\n".join(full_text_parts)
+    print("Полный текст чека:")
+    print(full_text)
+    
+    return full_text, lines
 
 def extract_items(lines: List[Tuple[str, float]]) -> List[Dict]:
     items = []
@@ -176,7 +169,7 @@ def extract_items(lines: List[Tuple[str, float]]) -> List[Dict]:
     for t, c in lines[:15]:
         print(f"  {t} (conf: {c:.1f})")
 
-    for text, conf in lines:
+    for i, (text, conf) in enumerate(lines):
         norm = normalize(text)
 
         if any(x in norm for x in ["КАССОВЫЙ ЧЕК", "ТОВАР", "ЦЕНА", "КОЛ-ВО", "СУММА", "КОЛИЧЕСТВО"]):
@@ -190,12 +183,15 @@ def extract_items(lines: List[Tuple[str, float]]) -> List[Dict]:
         if not in_items:
             continue
 
-        # 1. Полная строка "Название цена*кол-во"
-        m = re.search(r"^(?P<name>.+?)\s+(?P<price>\d+[\.,]\d{2})\s*\*\s*(?P<qty>\d+)$", text.strip(), re.IGNORECASE)
+        m = re.search(r"^(?P<price>\d+[\.,]\d{2})\s*\*\s*(?P<qty>\d+)$", text.strip(), re.IGNORECASE)
         if m:
-            name = m.group("name").strip()
-            qty = int(m.group("qty"))
             price = _normalize_number(m.group("price"))
+            qty = int(m.group("qty"))
+            name = "Неизвестный товар"
+            if i > 0:
+                prev = lines[i-1][0].strip()
+                if len(prev) > 5 and not re.match(r'^\d', prev):
+                    name = prev
             items.append({
                 "name": name,
                 "qty": qty,
@@ -204,10 +200,8 @@ def extract_items(lines: List[Tuple[str, float]]) -> List[Dict]:
                 "discount": None,
                 "conf": round(conf, 1)
             })
-            current_name = ""
             continue
 
-        # 2. Фрагмент цены или количества после имени
         price_m = re.search(r'(\d+[\.,]\d{2})', text)
         qty_m = re.search(r'\*(\d+)', text) or re.search(r'\b(\d+)\b', text)
 
@@ -225,8 +219,7 @@ def extract_items(lines: List[Tuple[str, float]]) -> List[Dict]:
             current_name = ""
             continue
 
-        # 3. Начинаем новое имя товара (если строка начинается с буквы)
-        if re.match(r'^[А-ЯA-Z0-9].+', text) and len(text) > 4:
+        if re.match(r'^[А-ЯA-Z0-9].+', text) and len(text) > 5:
             current_name = text.strip()
 
     return items
